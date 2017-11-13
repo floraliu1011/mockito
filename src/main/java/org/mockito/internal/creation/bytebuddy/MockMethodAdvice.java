@@ -24,6 +24,7 @@ import java.io.Serializable;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.ref.SoftReference;
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
@@ -34,6 +35,7 @@ import java.util.concurrent.Callable;
 public class MockMethodAdvice extends MockMethodDispatcher {
 
     final WeakConcurrentMap<Object, MockMethodInterceptor> interceptors;
+    private final Object backingMap;
 
     private final String identifier;
 
@@ -45,6 +47,13 @@ public class MockMethodAdvice extends MockMethodDispatcher {
     public MockMethodAdvice(WeakConcurrentMap<Object, MockMethodInterceptor> interceptors, String identifier) {
         this.interceptors = interceptors;
         this.identifier = identifier;
+        try {
+            Field field = WeakConcurrentMap.class.getDeclaredField("target");
+            field.setAccessible(true);
+            backingMap = field.get(interceptors);
+        } catch (Exception e) {
+            throw new MockitoException("Could not resolve backing map from concurrent hash map", e);
+        }
     }
 
     @SuppressWarnings("unused")
@@ -107,18 +116,18 @@ public class MockMethodAdvice extends MockMethodDispatcher {
         return new ReturnValueWrapper(interceptor.doIntercept(instance,
                 origin,
                 arguments,
-            realMethod,
+                realMethod,
                 new LocationImpl(t)));
     }
 
     @Override
     public boolean isMock(Object instance) {
-        return interceptors.containsKey(instance);
+        return instance != backingMap && interceptors.containsKey(instance);
     }
 
     @Override
     public boolean isMocked(Object instance) {
-        return !selfCallInfo.isSelfInvocation(instance) && isMock(instance);
+        return selfCallInfo.checkSuperCall(instance) && isMock(instance);
     }
 
     @Override
@@ -160,12 +169,8 @@ public class MockMethodAdvice extends MockMethodDispatcher {
             if (!Modifier.isPublic(origin.getDeclaringClass().getModifiers() & origin.getModifiers())) {
                 origin.setAccessible(true);
             }
-            Object previous = selfCallInfo.replace(instance);
-            try {
-                return tryInvoke(origin, instance, arguments);
-            } finally {
-                selfCallInfo.set(previous);
-            }
+            selfCallInfo.set(instance);
+            return tryInvoke(origin, instance, arguments);
         }
 
     }
@@ -252,14 +257,19 @@ public class MockMethodAdvice extends MockMethodDispatcher {
 
     private static class SelfCallInfo extends ThreadLocal<Object> {
 
-        Object replace(Object instance) {
+        Object replace(Object value) {
             Object current = get();
-            set(instance);
+            set(value);
             return current;
         }
 
-        boolean isSelfInvocation(Object instance) {
-            return get() == instance;
+        boolean checkSuperCall(Object value) {
+            if (value == get()) {
+                set(null);
+                return false;
+            } else {
+                return true;
+            }
         }
     }
 
